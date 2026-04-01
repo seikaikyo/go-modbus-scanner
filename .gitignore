@@ -1,0 +1,9 @@
+/modbus-scanner
+*.exe
+.env
+.env.*
+node_modules/
+.idea/
+.vscode/
+*.swp
+.DS_Store
