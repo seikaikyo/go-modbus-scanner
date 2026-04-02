@@ -1,4 +1,5 @@
 /modbus-scanner
+/scanner
 *.exe
 .env
 .env.*

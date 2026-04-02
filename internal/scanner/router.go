@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/goburrow/modbus"
 )
 
 // Job represents an async scan job.
@@ -71,12 +74,27 @@ func Router() chi.Router {
 	r.Post("/api/read", handleRead)
 	r.Get("/api/jobs", handleListJobs)
 	r.Get("/api/jobs/{id}", handleGetJob)
+	r.Get("/api/serial/ports", handleListSerialPorts)
 
 	// Embedded frontend
 	r.HandleFunc("/*", staticHandler())
 	r.HandleFunc("/", staticHandler())
 
 	return r
+}
+
+func validateScanRequest(req *ScanRequest) string {
+	req.applyDefaults()
+	if req.Mode == "rtu" {
+		if req.SerialPort == "" {
+			return "serial_port is required for RTU mode"
+		}
+	} else {
+		if req.Host == "" {
+			return "host is required for TCP mode"
+		}
+	}
+	return ""
 }
 
 func handleScan(w http.ResponseWriter, r *http.Request) {
@@ -86,16 +104,15 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Host == "" {
-		respondErr(w, http.StatusBadRequest, "host is required")
+	if msg := validateScanRequest(&req); msg != "" {
+		respondErr(w, http.StatusBadRequest, msg)
 		return
 	}
 
-	req.applyDefaults()
 	job := store.create(req)
 
 	go func() {
-		slog.Info("scan started", "job_id", job.ID, "host", req.Host, "port", req.Port)
+		slog.Info("scan started", "job_id", job.ID, "mode", req.Mode, "host", req.Host, "serial", req.SerialPort)
 		result, err := Scan(req)
 
 		store.mu.Lock()
@@ -130,12 +147,10 @@ func handleQuickScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Host == "" {
-		respondErr(w, http.StatusBadRequest, "host is required")
+	if msg := validateScanRequest(&req); msg != "" {
+		respondErr(w, http.StatusBadRequest, msg)
 		return
 	}
-
-	req.applyDefaults()
 	req.ScanTypes = []string{"holding"}
 	if req.AddressEnd > 999 {
 		req.AddressEnd = 999
@@ -169,28 +184,47 @@ func handleQuickScan(w http.ResponseWriter, r *http.Request) {
 
 func handleRead(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Host    string `json:"host"`
-		Port    int    `json:"port"`
-		UnitID  uint8  `json:"unit_id"`
-		Type    string `json:"type"`
-		Address uint16 `json:"address"`
-		Count   uint16 `json:"count"`
+		Mode       string `json:"mode"`
+		Host       string `json:"host"`
+		Port       int    `json:"port"`
+		SerialPort string `json:"serial_port"`
+		BaudRate   int    `json:"baud_rate"`
+		DataBits   int    `json:"data_bits"`
+		StopBits   int    `json:"stop_bits"`
+		Parity     string `json:"parity"`
+		UnitID     uint8  `json:"unit_id"`
+		Type       string `json:"type"`
+		Address    uint16 `json:"address"`
+		Count      uint16 `json:"count"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Host == "" {
-		respondErr(w, http.StatusBadRequest, "host is required")
+	scanReq := ScanRequest{
+		Mode:       req.Mode,
+		Host:       req.Host,
+		Port:       req.Port,
+		SerialPort: req.SerialPort,
+		BaudRate:   req.BaudRate,
+		DataBits:   req.DataBits,
+		StopBits:   req.StopBits,
+		Parity:     req.Parity,
+		UnitID:     req.UnitID,
+		TimeoutMs:  500,
+	}
+	scanReq.applyDefaults()
+
+	if scanReq.Mode == "rtu" && scanReq.SerialPort == "" {
+		respondErr(w, http.StatusBadRequest, "serial_port is required for RTU mode")
 		return
 	}
-	if req.Port == 0 {
-		req.Port = 502
+	if scanReq.Mode == "tcp" && scanReq.Host == "" {
+		respondErr(w, http.StatusBadRequest, "host is required for TCP mode")
+		return
 	}
-	if req.UnitID == 0 {
-		req.UnitID = 1
-	}
+
 	if req.Type == "" {
 		req.Type = "holding"
 	}
@@ -201,19 +235,14 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 		req.Count = 125
 	}
 
-	addr := fmt.Sprintf("%s:%d", req.Host, req.Port)
-	handler := modbus.NewTCPClientHandler(addr)
-	handler.Timeout = 500 * time.Millisecond
-	handler.SlaveId = req.UnitID
-
-	if err := handler.Connect(); err != nil {
+	conn, err := newClient(scanReq)
+	if err != nil {
 		respondErr(w, http.StatusBadGateway, "connect failed: "+err.Error())
 		return
 	}
-	defer handler.Close()
+	defer conn.Close()
 
-	client := modbus.NewClient(handler)
-	data, err := readBatch(client, req.Type, req.Address, req.Count)
+	data, err := readBatch(conn.Client, req.Type, req.Address, req.Count)
 	if err != nil {
 		respondErr(w, http.StatusBadGateway, "read failed: "+err.Error())
 		return
@@ -221,13 +250,70 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 
 	values := bytesToUint16(data)
 	respondOK(w, map[string]any{
-		"device":  addr,
-		"unit_id": req.UnitID,
+		"device":  conn.Device,
+		"unit_id": scanReq.UnitID,
 		"type":    req.Type,
 		"address": req.Address,
 		"count":   len(values),
 		"values":  values,
 	})
+}
+
+func handleListSerialPorts(w http.ResponseWriter, r *http.Request) {
+	ports := listSerialPorts()
+	respondOK(w, map[string]any{"ports": ports})
+}
+
+func listSerialPorts() []string {
+	var patterns []string
+	switch runtime.GOOS {
+	case "darwin":
+		patterns = []string{"/dev/cu.usb*", "/dev/cu.wchusbserial*", "/dev/tty.usb*", "/dev/tty.wchusbserial*"}
+	case "linux":
+		patterns = []string{"/dev/ttyUSB*", "/dev/ttyACM*", "/dev/ttyS*"}
+	default: // windows
+		patterns = []string{}
+	}
+
+	var ports []string
+	seen := make(map[string]bool)
+	for _, p := range patterns {
+		matches, _ := filepath.Glob(p)
+		for _, m := range matches {
+			if !seen[m] {
+				seen[m] = true
+				ports = append(ports, m)
+			}
+		}
+	}
+
+	// On linux, filter /dev/ttyS* to only include those that are real devices
+	if runtime.GOOS == "linux" {
+		var filtered []string
+		for _, p := range ports {
+			if strings.HasPrefix(p, "/dev/ttyS") {
+				// Check if it's a real serial port by trying to stat it
+				if info, err := os.Stat(p); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+					filtered = append(filtered, p)
+				}
+			} else {
+				filtered = append(filtered, p)
+			}
+		}
+		ports = filtered
+	}
+
+	if ports == nil {
+		ports = []string{}
+	}
+	return ports
+}
+
+func deviceLabel(req ScanRequest) string {
+	if req.Mode == "rtu" {
+		return fmt.Sprintf("rtu:%s@%d", req.SerialPort, req.BaudRate)
+	}
+	return fmt.Sprintf("%s:%d", req.Host, req.Port)
 }
 
 func handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +323,7 @@ func handleListJobs(w http.ResponseWriter, r *http.Request) {
 		s := map[string]any{
 			"job_id":     j.ID,
 			"status":     j.Status,
-			"device":     fmt.Sprintf("%s:%d", j.Request.Host, j.Request.Port),
+			"device":     deviceLabel(j.Request),
 			"created_at": j.CreatedAt,
 		}
 		if j.Result != nil {

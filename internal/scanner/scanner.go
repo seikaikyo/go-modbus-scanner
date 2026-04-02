@@ -12,8 +12,21 @@ import (
 
 // ScanRequest is the input for a scan job.
 type ScanRequest struct {
-	Host             string   `json:"host"`
-	Port             int      `json:"port"`
+	// Connection mode: "tcp" (default) or "rtu"
+	Mode string `json:"mode"`
+
+	// TCP mode fields
+	Host string `json:"host"`
+	Port int    `json:"port"`
+
+	// RTU mode fields
+	SerialPort string `json:"serial_port"`
+	BaudRate   int    `json:"baud_rate"`
+	DataBits   int    `json:"data_bits"`
+	StopBits   int    `json:"stop_bits"`
+	Parity     string `json:"parity"` // "N", "E", "O"
+
+	// Common fields
 	UnitID           uint8    `json:"unit_id"`
 	ScanTypes        []string `json:"scan_types"`         // holding, input, coil, discrete
 	AddressStart     uint16   `json:"address_start"`
@@ -26,9 +39,27 @@ type ScanRequest struct {
 }
 
 func (r *ScanRequest) applyDefaults() {
+	if r.Mode == "" {
+		r.Mode = "tcp"
+	}
+	// TCP defaults
 	if r.Port == 0 {
 		r.Port = 502
 	}
+	// RTU defaults
+	if r.BaudRate == 0 {
+		r.BaudRate = 9600
+	}
+	if r.DataBits == 0 {
+		r.DataBits = 8
+	}
+	if r.StopBits == 0 {
+		r.StopBits = 1
+	}
+	if r.Parity == "" {
+		r.Parity = "N"
+	}
+	// Common defaults
 	if r.UnitID == 0 {
 		r.UnitID = 1
 	}
@@ -78,22 +109,66 @@ type ScanSummary struct {
 	Static       int `json:"static"`
 }
 
-// Scan runs a full scan against a Modbus TCP device.
+// clientConn wraps a modbus.Client with its closer.
+type clientConn struct {
+	Client modbus.Client
+	Close  func()
+	Device string // display label
+}
+
+// newClient creates a Modbus client based on the request mode.
+func newClient(req ScanRequest) (*clientConn, error) {
+	switch req.Mode {
+	case "rtu":
+		if req.SerialPort == "" {
+			return nil, fmt.Errorf("serial_port is required for RTU mode")
+		}
+		handler := modbus.NewRTUClientHandler(req.SerialPort)
+		handler.BaudRate = req.BaudRate
+		handler.DataBits = req.DataBits
+		handler.StopBits = req.StopBits
+		handler.Parity = req.Parity
+		handler.SlaveId = req.UnitID
+		handler.Timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+
+		if err := handler.Connect(); err != nil {
+			return nil, fmt.Errorf("connect serial %s: %w", req.SerialPort, err)
+		}
+		return &clientConn{
+			Client: modbus.NewClient(handler),
+			Close:  func() { handler.Close() },
+			Device: fmt.Sprintf("rtu:%s@%d", req.SerialPort, req.BaudRate),
+		}, nil
+
+	default: // tcp
+		addr := fmt.Sprintf("%s:%d", req.Host, req.Port)
+		handler := modbus.NewTCPClientHandler(addr)
+		handler.Timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+		handler.SlaveId = req.UnitID
+
+		if err := handler.Connect(); err != nil {
+			return nil, fmt.Errorf("connect %s: %w", addr, err)
+		}
+		return &clientConn{
+			Client: modbus.NewClient(handler),
+			Close:  func() { handler.Close() },
+			Device: addr,
+		}, nil
+	}
+}
+
+// Scan runs a full scan against a Modbus device (TCP or RTU).
 func Scan(req ScanRequest) (*ScanResult, error) {
 	req.applyDefaults()
 	start := time.Now()
 
-	addr := fmt.Sprintf("%s:%d", req.Host, req.Port)
-	handler := modbus.NewTCPClientHandler(addr)
-	handler.Timeout = time.Duration(req.TimeoutMs) * time.Millisecond
-	handler.SlaveId = req.UnitID
-
-	if err := handler.Connect(); err != nil {
-		return nil, fmt.Errorf("connect %s: %w", addr, err)
+	conn, err := newClient(req)
+	if err != nil {
+		return nil, err
 	}
-	defer handler.Close()
+	defer conn.Close()
 
-	client := modbus.NewClient(handler)
+	client := conn.Client
 
 	// Phase 1+2: Scan registers (first sample)
 	var allRaw []RawRegister
@@ -133,7 +208,7 @@ func Scan(req ScanRequest) (*ScanResult, error) {
 	}
 
 	return &ScanResult{
-		Device:     addr,
+		Device:     conn.Device,
 		UnitID:     req.UnitID,
 		DurationMs: time.Since(start).Milliseconds(),
 		Summary: ScanSummary{

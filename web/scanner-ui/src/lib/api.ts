@@ -1,8 +1,17 @@
 const BASE = '/api'
 
 export interface ScanRequest {
+  mode: 'tcp' | 'rtu'
+  // TCP
   host: string
   port: number
+  // RTU
+  serial_port: string
+  baud_rate: number
+  data_bits: number
+  stop_bits: number
+  parity: string
+  // Common
   unit_id: number
   scan_types: string[]
   address_start: number
@@ -91,8 +100,9 @@ async function get<T>(path: string): Promise<T> {
 export const api = {
   scan: (req: Partial<ScanRequest>) => post<{ job_id: string; status: string }>('/scan', req),
   quickScan: (req: Partial<ScanRequest>) => post<{ job_id: string; status: string }>('/scan/quick', req),
-  read: (req: { host: string; port?: number; unit_id?: number; type?: string; address: number; count: number }) =>
+  read: (req: Record<string, unknown>) =>
     post<{ device: string; values: number[] }>('/read', req),
   listJobs: () => get<JobSummary[]>('/jobs'),
   getJob: (id: string) => get<Job>(`/jobs/${id}`),
+  listSerialPorts: () => get<{ ports: string[] }>('/serial/ports'),
 }
