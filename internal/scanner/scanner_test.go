@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seikaikyo/go-common/response"
 )
 
 // --- Analyzer tests ---
@@ -200,7 +201,7 @@ func TestScanEndpointValidation(t *testing.T) {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
 
-	var body apiResponse
+	var body response.Body
 	json.NewDecoder(w.Body).Decode(&body)
 	if body.Success {
 		t.Error("should fail without host")

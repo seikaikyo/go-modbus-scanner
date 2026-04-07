@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/seikaikyo/go-common/response"
 )
 
 // Job represents an async scan job.
@@ -100,12 +101,12 @@ func validateScanRequest(req *ScanRequest) string {
 func handleScan(w http.ResponseWriter, r *http.Request) {
 	var req ScanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondErr(w, http.StatusBadRequest, "invalid request body")
+		response.Err(w,http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if msg := validateScanRequest(&req); msg != "" {
-		respondErr(w, http.StatusBadRequest, msg)
+		response.Err(w,http.StatusBadRequest, msg)
 		return
 	}
 
@@ -133,7 +134,7 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	respondOK(w, map[string]any{
+	response.OK(w,map[string]any{
 		"job_id":  job.ID,
 		"status":  job.Status,
 		"message": "scan started, poll GET /api/jobs/" + job.ID + " for results",
@@ -143,12 +144,12 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 func handleQuickScan(w http.ResponseWriter, r *http.Request) {
 	var req ScanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondErr(w, http.StatusBadRequest, "invalid request body")
+		response.Err(w,http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if msg := validateScanRequest(&req); msg != "" {
-		respondErr(w, http.StatusBadRequest, msg)
+		response.Err(w,http.StatusBadRequest, msg)
 		return
 	}
 	req.ScanTypes = []string{"holding"}
@@ -175,7 +176,7 @@ func handleQuickScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	respondOK(w, map[string]any{
+	response.OK(w,map[string]any{
 		"job_id":  job.ID,
 		"status":  job.Status,
 		"message": "quick scan started",
@@ -198,7 +199,7 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 		Count      uint16 `json:"count"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondErr(w, http.StatusBadRequest, "invalid request body")
+		response.Err(w,http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -217,11 +218,11 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 	scanReq.applyDefaults()
 
 	if scanReq.Mode == "rtu" && scanReq.SerialPort == "" {
-		respondErr(w, http.StatusBadRequest, "serial_port is required for RTU mode")
+		response.Err(w,http.StatusBadRequest, "serial_port is required for RTU mode")
 		return
 	}
 	if scanReq.Mode == "tcp" && scanReq.Host == "" {
-		respondErr(w, http.StatusBadRequest, "host is required for TCP mode")
+		response.Err(w,http.StatusBadRequest, "host is required for TCP mode")
 		return
 	}
 
@@ -237,19 +238,19 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := newClient(scanReq)
 	if err != nil {
-		respondErr(w, http.StatusBadGateway, "connect failed: "+err.Error())
+		response.Err(w,http.StatusBadGateway, "connect failed: "+err.Error())
 		return
 	}
 	defer conn.Close()
 
 	data, err := readBatch(conn.Client, req.Type, req.Address, req.Count)
 	if err != nil {
-		respondErr(w, http.StatusBadGateway, "read failed: "+err.Error())
+		response.Err(w,http.StatusBadGateway, "read failed: "+err.Error())
 		return
 	}
 
 	values := bytesToUint16(data)
-	respondOK(w, map[string]any{
+	response.OK(w,map[string]any{
 		"device":  conn.Device,
 		"unit_id": scanReq.UnitID,
 		"type":    req.Type,
@@ -261,7 +262,7 @@ func handleRead(w http.ResponseWriter, r *http.Request) {
 
 func handleListSerialPorts(w http.ResponseWriter, r *http.Request) {
 	ports := listSerialPorts()
-	respondOK(w, map[string]any{"ports": ports})
+	response.OK(w,map[string]any{"ports": ports})
 }
 
 func listSerialPorts() []string {
@@ -335,15 +336,15 @@ func handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		summaries[i] = s
 	}
-	respondOK(w, summaries)
+	response.OK(w,summaries)
 }
 
 func handleGetJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	job := store.get(id)
 	if job == nil {
-		respondErr(w, http.StatusNotFound, "job not found")
+		response.Err(w,http.StatusNotFound, "job not found")
 		return
 	}
-	respondOK(w, job)
+	response.OK(w,job)
 }

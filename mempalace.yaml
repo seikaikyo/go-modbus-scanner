@@ -1,0 +1,14 @@
+wing: go_modbus_scanner
+rooms:
+- name: cmd
+  description: Files from cmd/
+- name: video
+  description: Files from video/
+- name: web
+  description: Files from web/
+- name: internal
+  description: Files from internal/
+- name: openspec
+  description: Files from openspec/
+- name: general
+  description: Files that don't fit other rooms
